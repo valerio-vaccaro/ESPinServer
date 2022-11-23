@@ -1,2 +1,2 @@
 # ESPinServer
-ESP32 bassed pinserver prototype
+ESP32 based pinserver prototype
