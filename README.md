@@ -27,6 +27,23 @@ dummy responses for unknown or incorrect PINs.
 See the [PIN-server protocol notes](docs/PINSERVER_PROTOCOL.md) for the wire
 format and implementation details.
 
+## Protocol at a glance
+
+Jade sends `POST` requests to `/set_pin` or `/get_pin` on HTTP port 80. The
+JSON body is `{"data":"<base64>"}`. After decoding, the message contains a
+33-byte compressed secp256k1 client ephemeral key, a 4-byte little-endian
+replay counter, and an AES-256-CBC/HMAC-SHA256 encrypted payload. The decrypted
+payload contains `pin_secret`, optional client entropy, and a 65-byte recoverable
+signature. The server derives request and response keys through ECDH and the
+labels `blind_oracle_request` and `blind_oracle_response`.
+
+`/set_pin` creates a record and returns a key share. `/get_pin` verifies the
+record and returns the key share only for a valid PIN; unknown and incorrect
+PINs receive a dummy response. Replay counters must increase, failed attempts
+are delayed, and the third failed attempt invalidates the record. See the
+[technical message and field description](docs/PINSERVER_PROTOCOL.md) for the
+complete protocol.
+
 ## Firmware web interface
 
 After Wi-Fi setup, open `https://espinserver.local/` or the ESP32 IP address.

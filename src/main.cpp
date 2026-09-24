@@ -14,6 +14,7 @@
 #undef HTTP_ANY
 #include <esp_https_server.h>
 #include <esp_http_server.h>
+#include <esp_idf_version.h>
 #include "tls_credentials.h"
 #include "crypto_utils.h"
 #include "version.h"
@@ -57,8 +58,14 @@ public:
     bool begin(bool secure, const String& redirect_host = "") {
         httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
         if (secure) {
+#if defined(ESP_IDF_VERSION_MAJOR) && ESP_IDF_VERSION_MAJOR >= 5
             config.servercert = (const uint8_t*)tls_certificate_pem.c_str();
             config.servercert_len = tls_certificate_pem.length() + 1;
+#else
+            // Arduino-ESP32 2.x / ESP-IDF 4.x uses the historical field name.
+            config.cacert_pem = (const uint8_t*)tls_certificate_pem.c_str();
+            config.cacert_len = tls_certificate_pem.length() + 1;
+#endif
             config.prvtkey_pem = (const uint8_t*)tls_private_key_pem.c_str();
             config.prvtkey_len = tls_private_key_pem.length() + 1;
             config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
@@ -72,7 +79,9 @@ public:
         // Each httpd instance needs its own internal control socket. The
         // HTTPS config default uses DEF_CTRL_PORT+1, so give the HTTP API a
         // different control port when both listeners run simultaneously.
-        config.httpd.ctrl_port = secure ? ESP_HTTPD_DEF_CTRL_PORT + 1 : ESP_HTTPD_DEF_CTRL_PORT + 2;
+        // ESP-IDF 4.x does not expose ESP_HTTPD_DEF_CTRL_PORT publicly.
+        // Its default is 32768; use stable, distinct ports for both servers.
+        config.httpd.ctrl_port = secure ? 32769 : 32770;
         config.httpd.stack_size = 12288;
         config.httpd.uri_match_fn = httpd_uri_match_wildcard;
         if (httpd_ssl_start(&server_handle, &config) != ESP_OK) return false;

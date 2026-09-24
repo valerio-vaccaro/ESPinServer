@@ -5,6 +5,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/x509.h>
+#include <mbedtls/bignum.h>
 
 static bool generateTlsCredentials(const String& hostname, const IPAddress& address,
                                    String& certificate_pem, String& private_key_pem) {
@@ -43,27 +44,40 @@ static bool generateTlsCredentials(const String& hostname, const IPAddress& addr
     }
 
     uint8_t serial[16];
+    mbedtls_mpi serial_mpi;
+    mbedtls_mpi_init(&serial_mpi);
     if (result == 0) {
         mbedtls_ctr_drbg_random(drbg, serial, sizeof(serial));
         serial[0] &= 0x7f;
-        result = mbedtls_x509write_crt_set_serial_raw(certificate, serial, sizeof(serial));
+        result = mbedtls_mpi_read_binary(&serial_mpi, serial, sizeof(serial));
+        if (result == 0) result = mbedtls_x509write_crt_set_serial(certificate, &serial_mpi);
     }
 
-    // Add the configured mDNS hostname. The HTTP redirect always uses this
-    // name, so it remains valid even when the DHCP address changes.
-    mbedtls_x509_san_list san[2] = {};
+    // Add DNS and IP subject-alternative names. Build the small DER extension
+    // directly because older Arduino-ESP32 releases do not provide the newer
+    // mbedtls_x509write_crt_set_subject_alternative_name helper.
     uint8_t ip_bytes[4] = {address[0], address[1], address[2], address[3]};
-    san[0].node.type = MBEDTLS_X509_SAN_DNS_NAME;
-    san[0].node.san.unstructured_name.tag = MBEDTLS_ASN1_IA5_STRING;
-    san[0].node.san.unstructured_name.p = (unsigned char*)hostname.c_str();
-    san[0].node.san.unstructured_name.len = hostname.length();
-    san[0].next = &san[1];
-    san[1].node.type = MBEDTLS_X509_SAN_IP_ADDRESS;
-    san[1].node.san.unstructured_name.tag = MBEDTLS_ASN1_OCTET_STRING;
-    san[1].node.san.unstructured_name.p = ip_bytes;
-    san[1].node.san.unstructured_name.len = 4;
-    san[1].next = nullptr;
-    if (result == 0) result = mbedtls_x509write_crt_set_subject_alternative_name(certificate, san);
+    uint8_t san_extension[160] = {};
+    size_t hostname_len = hostname.length();
+    size_t names_len = 2 + hostname_len + 2 + sizeof(ip_bytes);
+    size_t san_len = 2 + names_len;
+    if (hostname_len > 126 || san_len > 126) result = -1;
+    if (result == 0) {
+        size_t offset = 0;
+        san_extension[offset++] = 0x30;
+        san_extension[offset++] = (uint8_t)names_len;
+        san_extension[offset++] = 0x82; // dNSName [2], IA5String
+        san_extension[offset++] = (uint8_t)hostname_len;
+        memcpy(san_extension + offset, hostname.c_str(), hostname_len);
+        offset += hostname_len;
+        san_extension[offset++] = 0x87; // iPAddress [7], OCTET STRING
+        san_extension[offset++] = sizeof(ip_bytes);
+        memcpy(san_extension + offset, ip_bytes, sizeof(ip_bytes));
+        offset += sizeof(ip_bytes);
+        const char san_oid[] = "\x55\x1d\x11";
+        result = mbedtls_x509write_crt_set_extension(certificate, san_oid, 3, false,
+                                                     san_extension, offset);
+    }
 
     unsigned char* certificate_buffer = (unsigned char*)calloc(1, 4096);
     unsigned char* key_buffer = (unsigned char*)calloc(1, 2048);
@@ -77,6 +91,7 @@ static bool generateTlsCredentials(const String& hostname, const IPAddress& addr
     }
 
     memset(serial, 0, sizeof(serial));
+    mbedtls_mpi_free(&serial_mpi);
     if (certificate_buffer) { memset(certificate_buffer, 0, 4096); free(certificate_buffer); }
     if (key_buffer) { memset(key_buffer, 0, 2048); free(key_buffer); }
     mbedtls_x509write_crt_free(certificate);
