@@ -11,10 +11,188 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <mbedtls/base64.h>
+#undef HTTP_ANY
+#include <esp_https_server.h>
+#include <esp_http_server.h>
+#include "tls_credentials.h"
 #include "crypto_utils.h"
 #include "version.h"
 
-WebServer server(80);
+// esp_http_server and Arduino WebServer use different HTTP_ANY definitions.
+#undef HTTP_ANY
+static const HTTPMethod ADAPTER_HTTP_ANY = (HTTPMethod)255;
+String tls_certificate_pem;
+String tls_private_key_pem;
+class HttpsWebAdapter;
+HttpsWebAdapter* active_adapter = nullptr;
+
+class HttpsWebAdapter {
+public:
+    using Handler = std::function<void(void)>;
+    struct Route { String path; HTTPMethod method; Handler handler; };
+    static const size_t MAX_ROUTES = 8;
+
+    void on(const char* path, Handler handler) { on(path, ADAPTER_HTTP_ANY, handler); }
+    void on(const char* path, HTTPMethod method, Handler handler) {
+        if (route_count < MAX_ROUTES) routes[route_count++] = {String(path), method, handler};
+    }
+    HTTPMethod method() const { return requestContext()->current_method; }
+    bool hasArg(const String& name) const { return requestContext()->findArg(name) >= 0; }
+    String arg(const String& name) const { const HttpsWebAdapter* context = requestContext(); int index = context->findArg(name); return index >= 0 ? context->args[index].value : String(); }
+    void sendHeader(const String& name, const String& value, bool first = false) {
+        (void)first;
+        HttpsWebAdapter* context = requestContext();
+        if (context->header_count < 8) context->response_headers[context->header_count++] = {name, value};
+    }
+    void send(int code, const char* content_type = nullptr, const String& content = String()) {
+        HttpsWebAdapter* context = requestContext();
+        if (!context->request) return;
+        String status = String(code) + " " + statusText(code);
+        httpd_resp_set_status(context->request, status.c_str());
+        if (content_type) httpd_resp_set_type(context->request, content_type);
+        for (size_t i = 0; i < context->header_count; i++) httpd_resp_set_hdr(context->request, context->response_headers[i].first.c_str(), context->response_headers[i].second.c_str());
+        httpd_resp_send(context->request, content.c_str(), content.length());
+        context->response_sent = true;
+    }
+    bool begin(bool secure, const String& redirect_host = "") {
+        httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
+        if (secure) {
+            config.servercert = (const uint8_t*)tls_certificate_pem.c_str();
+            config.servercert_len = tls_certificate_pem.length() + 1;
+            config.prvtkey_pem = (const uint8_t*)tls_private_key_pem.c_str();
+            config.prvtkey_len = tls_private_key_pem.length() + 1;
+            config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+        } else {
+            config.transport_mode = HTTPD_SSL_TRANSPORT_INSECURE;
+            redirect_to_https = true;
+            redirect_hostname = redirect_host;
+        }
+        config.port_secure = 443;
+        config.port_insecure = 80;
+        // Each httpd instance needs its own internal control socket. The
+        // HTTPS config default uses DEF_CTRL_PORT+1, so give the HTTP API a
+        // different control port when both listeners run simultaneously.
+        config.httpd.ctrl_port = secure ? ESP_HTTPD_DEF_CTRL_PORT + 1 : ESP_HTTPD_DEF_CTRL_PORT + 2;
+        config.httpd.stack_size = 12288;
+        config.httpd.uri_match_fn = httpd_uri_match_wildcard;
+        if (httpd_ssl_start(&server_handle, &config) != ESP_OK) return false;
+        httpd_uri_t wildcard = {};
+        wildcard.uri = "/*";
+        wildcard.method = (httpd_method_t)INT_MAX;
+        wildcard.handler = requestHandler;
+        wildcard.user_ctx = this;
+        return httpd_register_uri_handler(server_handle, &wildcard) == ESP_OK;
+    }
+    void handleClient() {}
+    void stop() {
+        if (server_handle) {
+            httpd_ssl_stop(server_handle);
+            server_handle = nullptr;
+        }
+    }
+
+private:
+    struct Argument { String name; String value; };
+    struct Header { String first; String second; };
+    Route routes[MAX_ROUTES];
+    size_t route_count = 0;
+    Argument args[24];
+    size_t arg_count = 0;
+    Header response_headers[8];
+    size_t header_count = 0;
+    httpd_req_t* request = nullptr;
+    HTTPMethod current_method = ADAPTER_HTTP_ANY;
+    bool response_sent = false;
+    httpd_handle_t server_handle = nullptr;
+    bool redirect_to_https = false;
+    String redirect_hostname;
+
+    HttpsWebAdapter* requestContext() const {
+        return active_adapter ? active_adapter : const_cast<HttpsWebAdapter*>(this);
+    }
+
+    static const char* statusText(int code) {
+        switch (code) {
+            case 200: return "OK"; case 201: return "Created"; case 303: return "See Other";
+            case 307: return "Temporary Redirect"; case 400: return "Bad Request"; case 401: return "Unauthorized";
+            case 403: return "Forbidden"; case 404: return "Not Found"; case 405: return "Method Not Allowed";
+            case 423: return "Locked"; case 429: return "Too Many Requests"; case 500: return "Internal Server Error";
+            default: return "Error";
+        }
+    }
+    int findArg(const String& name) const {
+        for (size_t i = 0; i < arg_count; i++) if (args[i].name == name) return (int)i;
+        return -1;
+    }
+    void addArgument(String item) {
+        if (!item.length() || arg_count >= 24) return;
+        int separator = item.indexOf('=');
+        String name = separator >= 0 ? item.substring(0, separator) : item;
+        String value = separator >= 0 ? item.substring(separator + 1) : String();
+        args[arg_count++] = {WebServer::urlDecode(name), WebServer::urlDecode(value)};
+    }
+    void parseArguments(const String& data) {
+        int start = 0;
+        while (start <= (int)data.length()) {
+            int end = data.indexOf('&', start);
+            if (end < 0) end = data.length();
+            addArgument(data.substring(start, end));
+            start = end + 1;
+        }
+    }
+    static HTTPMethod requestMethod(httpd_method_t method) {
+        if (method == HTTP_GET) return HTTP_GET;
+        if (method == HTTP_POST) return HTTP_POST;
+        return ADAPTER_HTTP_ANY;
+    }
+    static esp_err_t requestHandler(httpd_req_t* req) {
+        HttpsWebAdapter* self = (HttpsWebAdapter*)req->user_ctx;
+        return self->dispatch(req);
+    }
+    esp_err_t dispatch(httpd_req_t* req) {
+        active_adapter = this;
+        request = req; response_sent = false; arg_count = 0; header_count = 0;
+        current_method = requestMethod((httpd_method_t)req->method);
+        String path = String(req->uri);
+        int query = path.indexOf('?');
+        if (query >= 0) { parseArguments(path.substring(query + 1)); path = path.substring(0, query); }
+        if (req->content_len > 0) {
+            String body; body.reserve(req->content_len);
+            char buffer[512]; size_t remaining = req->content_len;
+            while (remaining) {
+                size_t chunk = remaining > sizeof(buffer) ? sizeof(buffer) : remaining;
+                int received = httpd_req_recv(req, buffer, chunk);
+                if (received <= 0) { request = nullptr; active_adapter = nullptr; return ESP_FAIL; }
+                body += String(buffer).substring(0, received); remaining -= received;
+            }
+            size_t content_type_len = httpd_req_get_hdr_value_len(req, "Content-Type");
+            char content_type[80] = {};
+            if (content_type_len && content_type_len < sizeof(content_type)) httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type));
+            if (strstr(content_type, "application/x-www-form-urlencoded")) parseArguments(body);
+            else if (!hasArg("plain")) args[arg_count++] = {"plain", body};
+        }
+        for (size_t i = 0; i < route_count; i++) {
+            if (routes[i].path == path && (routes[i].method == ADAPTER_HTTP_ANY || routes[i].method == current_method)) {
+                routes[i].handler();
+                if (!response_sent) httpd_resp_send(req, "", 0);
+                request = nullptr; active_adapter = nullptr;
+                return ESP_OK;
+            }
+        }
+        if (redirect_to_https) {
+            sendHeader("Location", "https://" + redirect_hostname + String(req->uri));
+            send(307, "text/plain", "Redirecting to HTTPS");
+        } else {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+        }
+        request = nullptr;
+        active_adapter = nullptr;
+        return ESP_OK;
+    }
+};
+
+HttpsWebAdapter server;
+HttpsWebAdapter apiServer;
 Preferences preferences;
 bool enable_led_activity = true;
 
@@ -40,6 +218,7 @@ uint32_t pin_save_errors = 0;
 uint32_t saved_pin_successes = 0;
 uint32_t saved_pin_failures = 0;
 bool enable_diagnostics = true;
+volatile bool refresh_https_pending = false;
 
 // Connection Logging (Pure RAM-based circular buffer - Idea 1/2 additions)
 #define MAX_LOGS 50
@@ -247,13 +426,16 @@ bool unlockStorage(const String& password) {
     }
     uint8_t* ciphertext = (uint8_t*)malloc(header.ciphertext_len);
     uint8_t tag[32];
-    uint8_t plaintext[sizeof(pin_db)];
-    bool read_ok = ciphertext && f.read(ciphertext, header.ciphertext_len) == header.ciphertext_len &&
+    // storage_decrypt writes the padded ciphertext before removing PKCS#7;
+    // reserve the complete ciphertext size, not only the final plaintext size.
+    uint8_t* plaintext = (uint8_t*)malloc(header.ciphertext_len);
+    bool read_ok = ciphertext && plaintext && f.read(ciphertext, header.ciphertext_len) == header.ciphertext_len &&
                    f.read(tag, sizeof(tag)) == sizeof(tag);
     f.close();
     if (!read_ok || !derive_storage_keys(password.c_str(), header.salt, sizeof(header.salt),
                                          storage_encryption_key, storage_authentication_key)) {
         free(ciphertext);
+        free(plaintext);
         return false;
     }
     size_t plaintext_len = 0;
@@ -261,11 +443,13 @@ bool unlockStorage(const String& password) {
                               ciphertext, header.ciphertext_len, tag, plaintext, &plaintext_len);
     free(ciphertext);
     if (!ok || plaintext_len != sizeof(pin_db)) {
+        free(plaintext);
         memset(storage_encryption_key, 0, sizeof(storage_encryption_key));
         memset(storage_authentication_key, 0, sizeof(storage_authentication_key));
         return false;
     }
     memcpy(pin_db, plaintext, sizeof(pin_db));
+    free(plaintext);
     memcpy(storage_salt, header.salt, sizeof(storage_salt));
     pin_unlocked = true;
     return true;
@@ -275,7 +459,7 @@ String authPage(const String& message = "") {
     bool setup_mode = !pin_blob_exists;
     String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" + UNIFIED_CSS + "</head><body>";
     html += "<div class='card'><h1>ESPinServer Security</h1>";
-    html += setup_mode ? "<h2>Create storage password</h2><p>Protect the PIN database stored in flash. Use 12–64 characters with uppercase, lowercase, a number, and a symbol.</p>" : "<h2>Unlock storage</h2><p>Enter the storage password to load the PIN database and continue.</p>";
+    html += setup_mode ? "<h2>Create storage password</h2><p>Protect the PIN database stored in flash. Use 12-64 characters with uppercase, lowercase, a number, and a symbol.</p>" : "<h2>Unlock storage</h2><p>Enter the storage password to load the PIN database and continue.</p>";
     if (message.length()) html += "<p style='color:#FF5252;'>" + htmlEscape(message) + "</p>";
     html += "<form method='POST' action='/auth'><div class='info-item'><strong>Password</strong><input type='password' name='password' required minlength='12' maxlength='64' autocomplete='current-password'></div>";
     if (setup_mode) html += "<div class='info-item'><strong>Repeat password</strong><input type='password' name='password_confirm' required minlength='12' maxlength='64' autocomplete='new-password'></div>";
@@ -288,7 +472,7 @@ void handleAuth() {
     if (server.method() == HTTP_POST) {
         String password = server.arg("password");
         if (!passwordIsSafe(password)) {
-            server.send(400, "text/html", authPage("Password must be 12–64 characters and include uppercase, lowercase, a number, and a symbol."));
+            server.send(400, "text/html", authPage("Password must be 12-64 characters and include uppercase, lowercase, a number, and a symbol."));
             return;
         }
         if (!pin_blob_exists) {
@@ -426,8 +610,8 @@ void saveConfig() {
 void startMDNS() {
     MDNS.end();
     if (MDNS.begin(mdns_name.c_str())) {
-        MDNS.addService("http", "tcp", 80);
-        Serial.println("mDNS responder started: http://" + mdns_name + ".local (broadcasting _http._tcp on port 80)");
+        MDNS.addService("https", "tcp", 443);
+        Serial.println("mDNS responder started: https://" + mdns_name + ".local (broadcasting _https._tcp on port 443)");
     } else {
         Serial.println("Error setting up MDNS responder!");
     }
@@ -504,7 +688,7 @@ void hexToBytes(String hex, uint8_t* data, size_t len) {
 void handleRoot() {
     if (!requireStorageAccess()) return;
     flashRequestLed();
-    String client_ip = server.client().remoteIP().toString();
+    String client_ip = "https-client";
     if (server.method() == HTTP_POST) {
         if (server.hasArg("wipe_pins")) {
             memset(pin_db, 0, sizeof(pin_db));
@@ -570,7 +754,7 @@ void handleRoot() {
 void handleConfig() {
     if (!requireStorageAccess()) return;
     flashRequestLed();
-    String client_ip = server.client().remoteIP().toString();
+    String client_ip = "https-client";
 
     if (server.method() == HTTP_POST) {
         if (server.hasArg("reset_stats")) {
@@ -594,6 +778,23 @@ void handleConfig() {
             addLog(client_ip, "/config", "200 OK (Random Server Key Generated)");
             server.sendHeader("Location", "/config");
             server.send(303);
+            return;
+        }
+
+        if (server.hasArg("refresh_certificate")) {
+            if (!regenerateTlsCredentials(preferences, mdns_name, WiFi.localIP(),
+                                          tls_certificate_pem, tls_private_key_pem)) {
+                addLog(client_ip, "/config", "500 TLS certificate refresh failed");
+                server.send(500, "text/plain", "Unable to generate a new TLS certificate.");
+                return;
+            }
+            refresh_https_pending = true;
+            addLog(client_ip, "/config", "200 TLS certificate refreshed");
+            server.send(200, "text/html",
+                        "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                        "<meta http-equiv='refresh' content='3;url=/config'></head><body>"
+                        "<h1>Certificate refreshed</h1><p>The HTTPS server is restarting. "
+                        "Reconnect in a few seconds and accept the new self-signed certificate.</p></body></html>");
             return;
         }
 
@@ -654,6 +855,10 @@ void handleConfig() {
     html += "<input type='hidden' name='generate_key' value='1'>";
     html += "<input type='submit' class='btn-danger' value='GENERATE NEW SERVER KEY'>";
     html += "</form>";
+    html += "<form method='POST' onsubmit='return confirm(\"Refresh the self-signed HTTPS certificate? Browsers will need to trust the new certificate again.\");'>";
+    html += "<input type='hidden' name='refresh_certificate' value='1'>";
+    html += "<input type='submit' class='btn-danger' value='REFRESH HTTPS CERTIFICATE'>";
+    html += "</form>";
     html += "<form method='POST' action='/' style='margin-top:25px;' onsubmit='return confirm(\"Wipe all records permanently?\");'>";
     html += "<input type='hidden' name='wipe_pins' value='1'>";
     html += "<input type='submit' class='btn-danger' style='margin-top:0;' value='WIPE ENTIRE DATABASE'>";
@@ -664,7 +869,7 @@ void handleConfig() {
 void handleShare() {
     if (!requireStorageAccess()) return;
     flashRequestLed();
-    String client_ip = server.client().remoteIP().toString();
+    String client_ip = "https-client";
 
     if (server.method() == HTTP_POST) {
         String requested_url_a = server.arg("url_a");
@@ -789,7 +994,7 @@ void handleShare() {
 void handleDiagnostics() {
     if (!requireStorageAccess()) return;
     flashRequestLed();
-    String client_ip = server.client().remoteIP().toString();
+    String client_ip = "https-client";
     if (!enable_diagnostics) {
         addLog(client_ip, "/diagnostics", "403 Forbidden");
         server.send(403, "text/plain", "Forbidden - Diagnostics pages are disabled in parameters.");
@@ -858,7 +1063,7 @@ void handleDiagnostics() {
 void handlePinRequest(bool is_set) {
     if (!requireStorageAccess(true)) return;
     flashRequestLed();
-    String client_ip = server.client().remoteIP().toString();
+    String client_ip = "https-client";
     String endpoint = is_set ? "/set_pin" : "/get_pin";
 
     // Count every PIN-save request as an error first. A successful response
@@ -1122,6 +1327,27 @@ void setup() {
     WiFiManager wm;
     wm.autoConnect("ESPinServer-Setup");
     updateLocalTime();
+
+    // Migrate pairing URLs generated by the previous HTTPS-only API. Keep
+    // custom/remote URLs untouched, but make the device's own API use port 80.
+    String old_ip_url = "https://" + WiFi.localIP().toString() + ":443";
+    String old_mdns_url = "https://" + mdns_name + ".local:443";
+    bool pairing_urls_migrated = false;
+    if (pairing_url_a == old_ip_url) {
+        pairing_url_a = "http://" + WiFi.localIP().toString() + ":80";
+        pairing_urls_migrated = true;
+    }
+    if (pairing_url_b == old_mdns_url) {
+        pairing_url_b = "http://" + mdns_name + ".local:80";
+        pairing_urls_migrated = true;
+    }
+    if (pairing_urls_migrated) saveConfig();
+
+    if (!loadOrGenerateTlsCredentials(preferences, mdns_name, WiFi.localIP(),
+                                      tls_certificate_pem, tls_private_key_pem)) {
+        Serial.println("TLS certificate generation/loading failed.");
+        return;
+    }
     
     startMDNS();
     
@@ -1130,13 +1356,26 @@ void setup() {
     server.on("/share", handleShare);
     server.on("/config", handleConfig);
     server.on("/diagnostics", handleDiagnostics);
-    server.on("/get_pin", [](){ handlePinRequest(false); });
-    server.on("/set_pin", [](){ handlePinRequest(true); });
+    apiServer.on("/get_pin", [](){ handlePinRequest(false); });
+    apiServer.on("/set_pin", [](){ handlePinRequest(true); });
     
-    server.begin();
-    Serial.println("Server started.");
+    if (!server.begin(true)) {
+        Serial.println("HTTPS server failed to start.");
+        return;
+    }
+    if (!apiServer.begin(false, mdns_name + ".local")) {
+        Serial.println("HTTP API server failed to start.");
+        return;
+    }
+    Serial.println("HTTPS pages started on port 443; HTTP PIN API on port 80; other HTTP paths redirect to HTTPS.");
 }
 
 void loop() {
-    server.handleClient();
+    if (refresh_https_pending) {
+        refresh_https_pending = false;
+        server.stop();
+        delay(100);
+        if (!server.begin(true)) Serial.println("HTTPS server failed to restart after certificate refresh.");
+        else Serial.println("HTTPS server restarted with refreshed certificate.");
+    }
 }

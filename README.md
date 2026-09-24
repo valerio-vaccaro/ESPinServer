@@ -14,7 +14,12 @@ ESP32-based research implementation of a local Blockstream-style PIN server.
 
 ## What it demonstrates
 
-The firmware exposes a local HTTP PIN server for DIY hardware. It implements
+The firmware exposes a local HTTPS web interface for configuration. Pages are
+served on port 443; the PIN API endpoints `/set_pin` and `/get_pin` remain
+available over HTTP on port 80 for client compatibility, while other HTTP paths
+redirect to HTTPS. On first boot the ESP32 generates and stores a
+self-signed certificate for its mDNS hostname. Browsers will show a trust
+warning until that certificate is explicitly trusted. It implements
 the Blockstream PIN-server v2 blind-oracle flow, including client key recovery,
 encrypted requests and responses, replay counters, PIN-attempt cooldowns, and
 dummy responses for unknown or incorrect PINs.

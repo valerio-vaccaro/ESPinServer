@@ -19,7 +19,11 @@ shares. Keep this firmware on an isolated test network and use test data only.
 
 ## HTTP endpoints
 
-The server listens on HTTP port 80:
+The web interface is served over HTTPS on port 443. The PIN API endpoints
+`/set_pin` and `/get_pin` remain available over HTTP on port 80 for client
+compatibility; all other HTTP paths redirect to the equivalent HTTPS URL. The firmware currently ships
+with a device-generated self-signed certificate stored in NVS, so browsers
+will show a trust warning until the certificate is explicitly trusted.
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
