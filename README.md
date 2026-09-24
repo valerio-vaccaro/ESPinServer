@@ -4,14 +4,13 @@ ESP32-based research implementation of a local Blockstream-style PIN server.
 
 > **Security warning — research use only**
 >
-> This firmware stores the server private key and PIN records unencrypted in
-> the ESP32's NVS/LittleFS storage. The records include PIN verification
-> material and AES key shares. An attacker who can read or modify the board's
-> flash can inspect or tamper with this information and may be able to attack
-> PINs or recover protected data. Do not use this firmware in production, with
-> real funds, or with credentials that need confidentiality. It is intended to
-> demonstrate how a local PIN server can work and to support research and
-> interoperability testing.
+> The PIN database is encrypted at rest in LittleFS with AES-256-CBC and
+> HMAC-SHA256 keys derived from a browser-created storage password using
+> PBKDF2-HMAC-SHA256. The password is not persisted and the database remains
+> locked until it is entered after Wi-Fi activation. The server private key and
+> configuration remain in the ESP32's NVS. Do not use this firmware in
+> production, with real funds, or with credentials that need strong physical
+> attack resistance. It is intended for research and interoperability testing.
 
 ## What it demonstrates
 

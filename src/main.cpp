@@ -62,13 +62,8 @@ void addLog(String ip, String ep, String status) {
     log_index = (log_index + 1) % MAX_LOGS;
 }
 
-// SECURITY WARNING: this is a research implementation, not a production
-// security boundary. The server private key in NVS and every PinRecord below
-// (including the PIN verification material and AES key share) are persisted
-// without device-level encryption. Anyone who can read or alter the flash can
-// inspect or tamper with these values and may gain information useful for
-// attacking a PIN. Do not use this firmware to protect production funds or
-// real user credentials. See docs/PINSERVER_PROTOCOL.md.
+// The PIN database is encrypted at rest. The unlock key is derived from a
+// browser-entered password and is never persisted by the firmware.
 //
 // Pin Database (matching exact Blockstream security model)
 #define MAX_PINS 16
@@ -86,6 +81,29 @@ struct PinRecord {
     bool valid;
 };
 PinRecord pin_db[MAX_PINS];
+
+static const uint8_t PIN_BLOB_MAGIC[8] = {'E','S','P','I','N','E','N','C'};
+static const uint8_t PIN_BLOB_VERSION = 1;
+static const size_t PIN_BLOB_SALT_LEN = 16;
+struct PinBlobHeader {
+    uint8_t magic[8];
+    uint8_t version;
+    uint8_t reserved[3];
+    uint32_t plaintext_len;
+    uint32_t ciphertext_len;
+    uint8_t salt[16];
+    uint8_t iv[16];
+};
+bool pin_blob_exists = false;
+bool pin_unlocked = false;
+bool legacy_pin_data_loaded = false;
+uint8_t storage_encryption_key[32];
+uint8_t storage_authentication_key[32];
+uint8_t storage_salt[PIN_BLOB_SALT_LEN];
+
+const size_t PIN_BLOB_MAX_CIPHERTEXT = sizeof(pin_db) + 16;
+
+String htmlEscape(const String& value);
 
 struct LegacyTimestampPinRecord {
     uint8_t pin_pubkey_hash[32];
@@ -161,20 +179,171 @@ const String UNIFIED_CSS =
     "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }"
     "</style>";
 
-void savePins() {
-    File f = LittleFS.open("/pins.bin", FILE_WRITE);
-    if (f) {
-        f.write((uint8_t*)pin_db, sizeof(pin_db));
-        f.close();
+bool savePins() {
+    if (!pin_unlocked) return false;
+    PinBlobHeader header;
+    memset(&header, 0, sizeof(header));
+    bool valid_header = false;
+    memcpy(header.magic, PIN_BLOB_MAGIC, sizeof(header.magic));
+    header.version = PIN_BLOB_VERSION;
+    memset(header.reserved, 0, sizeof(header.reserved));
+    header.plaintext_len = sizeof(pin_db);
+    header.ciphertext_len = sizeof(pin_db) + 16;
+    // Keep the salt stable for the current password-derived session.
+    File old = LittleFS.open("/pins.bin", FILE_READ);
+    if (old && old.size() >= sizeof(PinBlobHeader)) {
+        old.read((uint8_t*)&header, sizeof(header));
+        valid_header = memcmp(header.magic, PIN_BLOB_MAGIC, sizeof(header.magic)) == 0 &&
+                       header.version == PIN_BLOB_VERSION;
     }
+    old.close();
+    memcpy(header.magic, PIN_BLOB_MAGIC, sizeof(header.magic));
+    header.version = PIN_BLOB_VERSION;
+    header.plaintext_len = sizeof(pin_db);
+    header.ciphertext_len = sizeof(pin_db) + 16;
+    if (!valid_header) memcpy(header.salt, storage_salt, sizeof(header.salt));
+    crypto_random(header.iv, sizeof(header.iv));
+    uint8_t ciphertext[PIN_BLOB_MAX_CIPHERTEXT];
+    uint8_t tag[32];
+    if (!storage_encrypt(storage_encryption_key, storage_authentication_key,
+                         (uint8_t*)pin_db, sizeof(pin_db), header.iv, ciphertext, tag)) return false;
+    File f = LittleFS.open("/pins.tmp", FILE_WRITE);
+    if (!f) return false;
+    f.write((uint8_t*)&header, sizeof(header));
+    f.write(ciphertext, header.ciphertext_len);
+    f.write(tag, sizeof(tag));
+    f.close();
+    LittleFS.remove("/pins.bin");
+    LittleFS.rename("/pins.tmp", "/pins.bin");
+    pin_blob_exists = true;
+    return true;
+}
+
+bool passwordIsSafe(const String& password) {
+    if (password.length() < 12 || password.length() > 64) return false;
+    bool upper = false, lower = false, digit = false, special = false;
+    for (size_t i = 0; i < password.length(); i++) {
+        char c = password[i];
+        if (c >= 'A' && c <= 'Z') upper = true;
+        else if (c >= 'a' && c <= 'z') lower = true;
+        else if (c >= '0' && c <= '9') digit = true;
+        else if (c >= 33 && c <= 126) special = true;
+        else return false;
+    }
+    return upper && lower && digit && special;
+}
+
+bool unlockStorage(const String& password) {
+    File f = LittleFS.open("/pins.bin", FILE_READ);
+    if (!f || f.size() < sizeof(PinBlobHeader) + 32) return false;
+    PinBlobHeader header;
+    if (f.read((uint8_t*)&header, sizeof(header)) != sizeof(header) ||
+        memcmp(header.magic, PIN_BLOB_MAGIC, sizeof(header.magic)) != 0 ||
+        header.version != PIN_BLOB_VERSION || header.plaintext_len != sizeof(pin_db) ||
+        header.ciphertext_len != sizeof(pin_db) + 16 ||
+        f.size() != sizeof(PinBlobHeader) + header.ciphertext_len + 32) {
+        f.close();
+        return false;
+    }
+    uint8_t* ciphertext = (uint8_t*)malloc(header.ciphertext_len);
+    uint8_t tag[32];
+    uint8_t plaintext[sizeof(pin_db)];
+    bool read_ok = ciphertext && f.read(ciphertext, header.ciphertext_len) == header.ciphertext_len &&
+                   f.read(tag, sizeof(tag)) == sizeof(tag);
+    f.close();
+    if (!read_ok || !derive_storage_keys(password.c_str(), header.salt, sizeof(header.salt),
+                                         storage_encryption_key, storage_authentication_key)) {
+        free(ciphertext);
+        return false;
+    }
+    size_t plaintext_len = 0;
+    bool ok = storage_decrypt(storage_encryption_key, storage_authentication_key, header.iv,
+                              ciphertext, header.ciphertext_len, tag, plaintext, &plaintext_len);
+    free(ciphertext);
+    if (!ok || plaintext_len != sizeof(pin_db)) {
+        memset(storage_encryption_key, 0, sizeof(storage_encryption_key));
+        memset(storage_authentication_key, 0, sizeof(storage_authentication_key));
+        return false;
+    }
+    memcpy(pin_db, plaintext, sizeof(pin_db));
+    memcpy(storage_salt, header.salt, sizeof(storage_salt));
+    pin_unlocked = true;
+    return true;
+}
+
+String authPage(const String& message = "") {
+    bool setup_mode = !pin_blob_exists;
+    String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" + UNIFIED_CSS + "</head><body>";
+    html += "<div class='card'><h1>ESPinServer Security</h1>";
+    html += setup_mode ? "<h2>Create storage password</h2><p>Protect the PIN database stored in flash. Use 12–64 characters with uppercase, lowercase, a number, and a symbol.</p>" : "<h2>Unlock storage</h2><p>Enter the storage password to load the PIN database and continue.</p>";
+    if (message.length()) html += "<p style='color:#FF5252;'>" + htmlEscape(message) + "</p>";
+    html += "<form method='POST' action='/auth'><div class='info-item'><strong>Password</strong><input type='password' name='password' required minlength='12' maxlength='64' autocomplete='current-password'></div>";
+    if (setup_mode) html += "<div class='info-item'><strong>Repeat password</strong><input type='password' name='password_confirm' required minlength='12' maxlength='64' autocomplete='new-password'></div>";
+    html += "<input type='submit' value='" + String(setup_mode ? "CREATE ENCRYPTED STORAGE" : "UNLOCK STORAGE") + "'></form></div></body></html>";
+    return html;
+}
+
+void handleAuth() {
+    if (pin_unlocked) { server.sendHeader("Location", "/"); server.send(303); return; }
+    if (server.method() == HTTP_POST) {
+        String password = server.arg("password");
+        if (!passwordIsSafe(password)) {
+            server.send(400, "text/html", authPage("Password must be 12–64 characters and include uppercase, lowercase, a number, and a symbol."));
+            return;
+        }
+        if (!pin_blob_exists) {
+            if (password != server.arg("password_confirm")) {
+                server.send(400, "text/html", authPage("The two passwords do not match."));
+                return;
+            }
+            uint8_t salt[PIN_BLOB_SALT_LEN];
+            crypto_random(salt, sizeof(salt));
+            memcpy(storage_salt, salt, sizeof(storage_salt));
+            if (!derive_storage_keys(password.c_str(), salt, sizeof(salt), storage_encryption_key, storage_authentication_key)) {
+                server.send(500, "text/plain", "Could not derive storage key");
+                return;
+            }
+            pin_unlocked = true;
+            if (!savePins()) {
+                pin_unlocked = false;
+                server.send(500, "text/plain", "Could not create encrypted storage");
+                return;
+            }
+            pin_blob_exists = true;
+        } else if (!unlockStorage(password)) {
+            server.send(401, "text/html", authPage("Wrong password or corrupted encrypted storage."));
+            return;
+        }
+        server.sendHeader("Location", "/");
+        server.send(303);
+        return;
+    }
+    server.send(200, "text/html", authPage());
+}
+
+bool requireStorageAccess(bool api = false) {
+    if (pin_unlocked) return true;
+    if (api) server.send(423, "text/plain", "Storage is locked");
+    else { server.sendHeader("Location", "/auth"); server.send(303); }
+    return false;
 }
 
 void loadPins() {
     memset(pin_db, 0, sizeof(pin_db));
     File f = LittleFS.open("/pins.bin", FILE_READ);
     if (f) {
-        if (f.size() == sizeof(pin_db)) {
+        if (f.size() >= sizeof(PinBlobHeader) + 32) {
+            PinBlobHeader header;
+            f.read((uint8_t*)&header, sizeof(header));
+            pin_blob_exists = memcmp(header.magic, PIN_BLOB_MAGIC, sizeof(header.magic)) == 0 &&
+                              header.version == PIN_BLOB_VERSION &&
+                              header.plaintext_len == sizeof(pin_db) &&
+                              header.ciphertext_len == sizeof(pin_db) + 16 &&
+                              f.size() == sizeof(PinBlobHeader) + header.ciphertext_len + 32;
+        } else if (f.size() == sizeof(pin_db)) {
+            // One-time migration path for the old unencrypted firmware.
             f.read((uint8_t*)pin_db, sizeof(pin_db));
+            legacy_pin_data_loaded = true;
         } else if (f.size() >= sizeof(LegacyTimestampPinRecord) &&
                    (f.size() % sizeof(LegacyTimestampPinRecord)) == 0) {
             LegacyTimestampPinRecord legacy;
@@ -193,7 +362,7 @@ void loadPins() {
                 pin_db[i].valid = legacy.valid;
             }
             f.close();
-            savePins();
+            legacy_pin_data_loaded = true;
             return;
         } else if (f.size() >= sizeof(LegacyPinRecord) &&
                    (f.size() % sizeof(LegacyPinRecord)) == 0) {
@@ -211,7 +380,7 @@ void loadPins() {
                 pin_db[i].valid = legacy.valid;
             }
             f.close();
-            savePins();
+            legacy_pin_data_loaded = true;
             return;
         }
         f.close();
@@ -333,6 +502,7 @@ void hexToBytes(String hex, uint8_t* data, size_t len) {
 }
 
 void handleRoot() {
+    if (!requireStorageAccess()) return;
     flashRequestLed();
     String client_ip = server.client().remoteIP().toString();
     if (server.method() == HTTP_POST) {
@@ -398,6 +568,7 @@ void handleRoot() {
 }
 
 void handleConfig() {
+    if (!requireStorageAccess()) return;
     flashRequestLed();
     String client_ip = server.client().remoteIP().toString();
 
@@ -491,6 +662,7 @@ void handleConfig() {
 }
 
 void handleShare() {
+    if (!requireStorageAccess()) return;
     flashRequestLed();
     String client_ip = server.client().remoteIP().toString();
 
@@ -615,6 +787,7 @@ void handleShare() {
 }
 
 void handleDiagnostics() {
+    if (!requireStorageAccess()) return;
     flashRequestLed();
     String client_ip = server.client().remoteIP().toString();
     if (!enable_diagnostics) {
@@ -683,6 +856,7 @@ void handleDiagnostics() {
 }
 
 void handlePinRequest(bool is_set) {
+    if (!requireStorageAccess(true)) return;
     flashRequestLed();
     String client_ip = server.client().remoteIP().toString();
     String endpoint = is_set ? "/set_pin" : "/get_pin";
@@ -951,6 +1125,7 @@ void setup() {
     
     startMDNS();
     
+    server.on("/auth", handleAuth);
     server.on("/", handleRoot);
     server.on("/share", handleShare);
     server.on("/config", handleConfig);

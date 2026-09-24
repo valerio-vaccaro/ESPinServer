@@ -7,9 +7,99 @@
 #include "utility/trezor/hasher.h"
 #include <mbedtls/md.h>
 #include <mbedtls/aes.h>
+#include "esp_random.h"
 
 void crypto_init() {
     // nothing needed for trezor-crypto
+}
+
+void crypto_random(uint8_t* out, size_t len) {
+    while (len >= sizeof(uint32_t)) {
+        uint32_t value = esp_random();
+        memcpy(out, &value, sizeof(value));
+        out += sizeof(value);
+        len -= sizeof(value);
+    }
+    if (len) {
+        uint32_t value = esp_random();
+        memcpy(out, &value, len);
+    }
+}
+
+bool derive_storage_keys(const char* password, const uint8_t* salt, size_t salt_len,
+                         uint8_t* encryption_key, uint8_t* authentication_key) {
+    // PBKDF2-HMAC-SHA256 with a deliberately expensive work factor for a local
+    // unlock password. Two blocks provide independent AES and HMAC keys.
+    const uint32_t iterations = 120000;
+    uint8_t block_input[64];
+    if (salt_len > 48) return false;
+    memcpy(block_input, salt, salt_len);
+    uint8_t u[32];
+    uint8_t t[32];
+    const uint8_t* password_bytes = (const uint8_t*)password;
+    size_t password_len = strlen(password);
+    for (uint32_t block = 1; block <= 2; block++) {
+        block_input[salt_len] = (uint8_t)(block >> 24);
+        block_input[salt_len + 1] = (uint8_t)(block >> 16);
+        block_input[salt_len + 2] = (uint8_t)(block >> 8);
+        block_input[salt_len + 3] = (uint8_t)block;
+        hmac_crypto_sha256(password_bytes, password_len, block_input, salt_len + 4, u);
+        memcpy(t, u, sizeof(t));
+        for (uint32_t i = 1; i < iterations; i++) {
+            hmac_crypto_sha256(password_bytes, password_len, u, sizeof(u), u);
+            for (size_t j = 0; j < sizeof(t); j++) t[j] ^= u[j];
+        }
+        memcpy(block == 1 ? encryption_key : authentication_key, t, 32);
+    }
+    memset(u, 0, sizeof(u));
+    memset(t, 0, sizeof(t));
+    return true;
+}
+
+bool storage_encrypt(const uint8_t* encryption_key, const uint8_t* authentication_key,
+                     const uint8_t* plaintext, size_t plaintext_len,
+                     const uint8_t* iv, uint8_t* ciphertext, uint8_t* tag) {
+    size_t pad = 16 - (plaintext_len % 16);
+    size_t padded_len = plaintext_len + pad;
+    uint8_t* padded = (uint8_t*)malloc(padded_len);
+    if (!padded) return false;
+    memcpy(padded, plaintext, plaintext_len);
+    memset(padded + plaintext_len, (uint8_t)pad, pad);
+    uint8_t chain[16];
+    memcpy(chain, iv, sizeof(chain));
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    bool ok = mbedtls_aes_setkey_enc(&aes, encryption_key, 256) == 0 &&
+              mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, padded_len, chain, padded, ciphertext) == 0;
+    mbedtls_aes_free(&aes);
+    if (ok) hmac_crypto_sha256(authentication_key, 32, ciphertext, padded_len, tag);
+    memset(padded, 0, padded_len);
+    free(padded);
+    return ok;
+}
+
+bool storage_decrypt(const uint8_t* encryption_key, const uint8_t* authentication_key,
+                     const uint8_t* iv, const uint8_t* ciphertext, size_t ciphertext_len,
+                     const uint8_t* tag, uint8_t* plaintext, size_t* plaintext_len) {
+    if (!ciphertext_len || ciphertext_len % 16) return false;
+    uint8_t expected_tag[32];
+    hmac_crypto_sha256(authentication_key, 32, ciphertext, ciphertext_len, expected_tag);
+    uint8_t difference = 0;
+    for (size_t i = 0; i < sizeof(expected_tag); i++) difference |= expected_tag[i] ^ tag[i];
+    if (difference != 0) return false;
+    uint8_t chain[16];
+    memcpy(chain, iv, sizeof(chain));
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    bool ok = mbedtls_aes_setkey_dec(&aes, encryption_key, 256) == 0 &&
+              mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, ciphertext_len, chain, ciphertext, plaintext) == 0;
+    mbedtls_aes_free(&aes);
+    if (!ok) return false;
+    uint8_t pad = plaintext[ciphertext_len - 1];
+    if (pad == 0 || pad > 16 || pad > ciphertext_len) return false;
+    for (size_t i = 0; i < pad; i++) if (plaintext[ciphertext_len - 1 - i] != pad) return false;
+    *plaintext_len = ciphertext_len - pad;
+    return true;
 }
 
 void crypto_sha256(const uint8_t* data, size_t len, uint8_t* out) {

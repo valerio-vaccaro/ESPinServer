@@ -41,8 +41,11 @@ Successful requests return the same shape with an encrypted response:
 ```
 
 The transport is HTTP, so deployments should remain on a trusted local
-network. The protocol payload has its own authenticated encryption, but that
-does not protect the unencrypted configuration and database on the board.
+network. The protocol payload has its own authenticated encryption. The PIN
+database is also encrypted at rest in `/pins.bin`; after Wi-Fi activation the
+browser must create or enter the storage password before any interface or PIN
+endpoint is available. Configuration and the server private key remain in
+NVS.
 
 ## Request format
 
