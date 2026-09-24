@@ -1,11 +1,54 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Getting started · ESPinServer</title><link rel="stylesheet" href="style.css"></head>
-<body><header class="compact"><a href="index.html">← ESPinServer</a><h1>Getting started</h1><nav><a href="index.html">Overview</a><a href="protocol.html">Protocol</a><a href="security.html">Security</a></nav></header><main>
-<div class="warning"><strong>Use test data only.</strong> This firmware is a research demonstration, not a production PIN service.</div>
-<h2>Build and first boot</h2><ol><li>Flash the generated image using the <a href="https://valerio-vaccaro.github.io/diyflasher/">browser flasher</a> or PlatformIO.</li><li>Connect to the <code>ESPinServer-Setup</code> Wi-Fi network and configure local Wi-Fi in the captive portal.</li><li>Open <code>https://espinserver.local/</code> or <code>https://&lt;device-ip&gt;/</code>. Accept the warning for the device-generated self-signed certificate.</li><li>Create a storage password on first boot. It must be 12–64 ASCII characters and include uppercase, lowercase, a number, and a symbol. Enter it twice.</li><li>On later boots, enter the password once to unlock the encrypted PIN database.</li></ol>
-<h2>Pair a Blockstream Jade</h2><ol><li>Make sure the Jade and ESP32 are on the same local network.</li><li>Open the ESPinServer <strong>Pairing</strong> page. Confirm the primary and secondary URLs use <code>http://</code> and port <code>80</code>; these are the PIN API URLs, not the browser URL.</li><li>Use the Jade custom PIN-server configuration flow to scan the QR code. The QR contains the API URLs and ESPinServer public key.</li><li>Lock and unlock the Jade with a test PIN. ESPinServer creates the record through <code>/set_pin</code>; subsequent unlocks use <code>/get_pin</code>.</li></ol><p>If the QR workflow is unavailable, the official Jade repository includes <a href="https://github.com/Blockstream/Jade/blob/master/set_jade_pinserver.py"><code>set_jade_pinserver.py</code></a> for setting the primary URL, secondary URL, and public key over USB.</p>
-<h2>HTTP and HTTPS ports</h2><p>Use HTTPS for the ESPinServer pages:</p><pre><code>https://espinserver.local/
-https://&lt;device-ip&gt;/</code></pre><p>Use HTTP only for the Jade-compatible API:</p><pre><code>http://&lt;device-ip&gt;:80/set_pin
-http://&lt;device-ip&gt;:80/get_pin</code></pre><p>Old pairing URLs saved by earlier firmware versions are migrated from <code>https://…:443</code> to <code>http://…:80</code> when possible.</p>
-<h2>Maintenance</h2><p>The Configuration page can refresh the self-signed HTTPS certificate. After refreshing, reconnect to the site and trust the new certificate again. Generating a new server key invalidates clients using the previous public key. Wiping the database removes all stored PIN records.</p>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Step-by-step tutorial · ESPinServer</title><link rel="stylesheet" href="style.css"></head>
+<body><header class="compact"><a href="index.html">← ESPinServer</a><h1>Step-by-step tutorial</h1><nav><a href="index.html">Overview</a><a href="protocol.html">Protocol</a><a href="security.html">Security</a></nav></header><main>
+<div class="warning"><strong>Use test data only.</strong> ESPinServer is experimental, unaudited firmware. Use a disposable wallet, PIN, and isolated local network.</div>
+<p>This guide takes a blank ESP32 from firmware build to a first test connection with a Blockstream Jade. The repository version is available as <a href="TUTORIAL.md">Markdown</a> for offline reading.</p>
+
+<h2>1. Prepare the hardware</h2>
+<p>You need an ESP32 or ESP32-S3 board listed in <a href="https://github.com/valerio-vaccaro/ESPinServer/blob/main/platformio.ini">platformio.ini</a>, a USB data cable, a computer with the repository, a shared 2.4 GHz Wi-Fi network, and a Jade configured for custom PIN-server use.</p>
+
+<h2>2. Build and flash</h2>
+<p>From the repository root, build the firmware:</p>
+<pre><code>./venv/bin/pio run</code></pre>
+<p>Upload the standard ESP32 environment over USB:</p>
+<pre><code>./venv/bin/pio run -e esp32dev -t upload
+./venv/bin/pio device monitor -b 115200</code></pre>
+<p>For an ESP32-S3 DevKitC-1, replace <code>esp32dev</code> with <code>esp32-s3-devkitc-1</code>. If more than one serial port is present, add <code>--upload-port &lt;port&gt;</code>. You can alternatively use the <a href="https://valerio-vaccaro.github.io/diyflasher/">browser flasher</a> with a packaged GitHub Actions build.</p>
+
+<h2>3. Configure Wi-Fi</h2>
+<ol><li>After first boot, connect to the <code>ESPinServer-Setup</code> Wi-Fi network.</li><li>Complete the captive portal with the local Wi-Fi credentials.</li><li>Return your computer or phone to the same local network as the ESP32.</li></ol>
+<p>If the captive portal does not open automatically, use the network notification or the address shown by the setup page. The serial monitor runs at 115200 baud and is useful for finding the assigned IP address.</p>
+
+<h2>4. Open the administration page</h2>
+<p>Use the mDNS name or the device IP:</p>
+<pre><code>https://espinserver.local/
+https://&lt;device-ip&gt;/</code></pre>
+<p>The certificate is generated and self-signed by the device, so a browser warning is expected. Verify the local address, then accept the certificate for this test device. The administration page is HTTPS on port 443.</p>
+
+<h2>5. Create or unlock storage</h2>
+<p>On a new device, create a 12–64 character storage password containing an uppercase letter, lowercase letter, number, and printable symbol. Enter it twice. The password is not stored; it derives the keys that protect the encrypted <code>/pins.bin</code> database.</p>
+<p>After a reboot, enter the password once to unlock the database. The PIN API returns <code>423</code> until storage is unlocked.</p>
+
+<h2>6. Check the Pairing page</h2>
+<p>Open <strong>Pairing</strong> and confirm that both API URLs use <code>http://</code> and port <code>80</code>. These are not the same as the browser URL:</p>
+<pre><code>Browser:  https://192.168.1.42/
+Primary:  http://192.168.1.42:80
+Fallback: http://espinserver.local:80</code></pre>
+<p>The page also shows the server public key and generates the QR code. Edit and save the URLs if your network needs different addresses.</p>
+
+<h2>7. Pair and test the Jade</h2>
+<ol><li>Open the Jade custom PIN-server configuration flow.</li><li>Scan the QR code on the Pairing page.</li><li>Confirm the URLs and server public key on the Jade.</li><li>Lock and unlock the Jade using a test PIN.</li></ol>
+<p>The first successful setup calls <code>POST /set_pin</code> and creates a record. Later unlocks call <code>POST /get_pin</code>. The <a href="https://github.com/Blockstream/Jade/blob/master/set_jade_pinserver.py">official Jade script</a> can configure the same values over USB when QR scanning is unavailable.</p>
+
+<h2>8. Check results</h2>
+<p>Use <strong>Dashboard</strong> for request counters and slot usage. Use <strong>Diagnostics</strong> for record metadata and recent connection logs; it never displays PINs.</p>
+<p>Wrong PIN behavior is intentionally delayed: the first failure starts a 5-second cooldown, the second starts a 60-second cooldown, and the third invalidates the record. Unknown or incorrect PINs receive a dummy response with the normal protocol shape.</p>
+
+<h2>Maintenance</h2>
+<ul><li>Refreshing the certificate requires trusting the new certificate again.</li><li>Generating a new server key changes the QR public key and requires re-pairing clients.</li><li>Wiping the database removes all stored PIN records.</li></ul>
+
+<h2>Troubleshooting</h2>
+<p>If the browser cannot connect, try the IP address instead of <code>espinserver.local</code>, confirm the computer is on the same LAN, and check the serial monitor. If the Jade cannot connect, verify that the QR contains HTTP port-80 URLs rather than the HTTPS browser URL. Status <code>423</code> means storage is locked; <code>429</code> or <code>403</code> indicates failed-PIN cooldown or invalidation.</p>
+
+<p>For wire fields and key derivation, read the <a href="PINSERVER_PROTOCOL.md">protocol notes</a>. For threat-model limitations, read the <a href="security.html">security model</a>.</p>
 </main><footer>ESPinServer · experimental and unaudited</footer></body></html>

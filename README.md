@@ -1,112 +1,120 @@
-# ESPinServer — the ESP-based PinServer
+# ESPinServer
 
-ESP32-based research implementation of a local Blockstream-style PIN server.
+ESPinServer is an ESP32-based research implementation of a local,
+Blockstream-style PIN server for [Blockstream Jade](https://github.com/Blockstream/Jade)
+interoperability testing.
 
-> **Security warning — research use only**
+> **Research use only**
 >
-> The PIN database is encrypted at rest in LittleFS with AES-256-CBC and
-> HMAC-SHA256 keys derived from a browser-created storage password using
-> PBKDF2-HMAC-SHA256. The password is not persisted and the database remains
-> locked until it is entered after Wi-Fi activation. The server private key and
-> configuration remain in the ESP32's NVS. Do not use this firmware in
-> production, with real funds, or with credentials that need strong physical
-> attack resistance. It is intended for research and interoperability testing.
+> Do not use this firmware with production funds, real wallet PINs, or
+> credentials that require strong physical-attack resistance. The PIN database
+> is encrypted at rest, but the server private key and configuration remain in
+> ESP32 NVS. The firmware is experimental and unaudited.
 
-## What it demonstrates
+## Start here
 
-The firmware exposes a local HTTPS web interface for configuration. Pages are
-served on port 443; the PIN API endpoints `/set_pin` and `/get_pin` remain
-available over HTTP on port 80 for client compatibility, while other HTTP paths
-redirect to HTTPS. On first boot the ESP32 generates and stores a
-self-signed certificate for its mDNS hostname. Browsers will show a trust
-warning until that certificate is explicitly trusted. It implements
-the Blockstream PIN-server v2 blind-oracle flow, including client key recovery,
-encrypted requests and responses, replay counters, PIN-attempt cooldowns, and
-dummy responses for unknown or incorrect PINs.
+The complete first-time setup is in the [step-by-step tutorial](docs/TUTORIAL.md).
+The shortest path is:
 
-See the [PIN-server protocol notes](docs/PINSERVER_PROTOCOL.md) for the wire
-format and implementation details.
+1. Build and flash an ESP32 with PlatformIO.
+2. Join the `ESPinServer-Setup` Wi-Fi network and configure local Wi-Fi.
+3. Open the HTTPS administration page and create or enter the storage password.
+4. Open **Pairing**, scan its QR code with a Jade, and test with a disposable PIN.
 
-## Protocol at a glance
+The project also has a [web documentation site](https://valerio-vaccaro.github.io/ESPinServer/)
+with the tutorial, screenshots, protocol notes, and security model.
 
-Jade sends `POST` requests to `/set_pin` or `/get_pin` on HTTP port 80. The
-JSON body is `{"data":"<base64>"}`. After decoding, the message contains a
-33-byte compressed secp256k1 client ephemeral key, a 4-byte little-endian
-replay counter, and an AES-256-CBC/HMAC-SHA256 encrypted payload. The decrypted
-payload contains `pin_secret`, optional client entropy, and a 65-byte recoverable
-signature. The server derives request and response keys through ECDH and the
-labels `blind_oracle_request` and `blind_oracle_response`.
+## What the firmware does
 
-`/set_pin` creates a record and returns a key share. `/get_pin` verifies the
-record and returns the key share only for a valid PIN; unknown and incorrect
-PINs receive a dummy response. Replay counters must increase, failed attempts
-are delayed, and the third failed attempt invalidates the record. See the
-[technical message and field description](docs/PINSERVER_PROTOCOL.md) for the
-complete protocol.
+ESPinServer provides a local web administration interface and the Jade PIN-server
+v2 blind-oracle API:
 
-## Firmware web interface
+| Service | Address | Use |
+| --- | --- | --- |
+| Administration | `https://<device>:443` | Setup, pairing, configuration, and diagnostics |
+| PIN API | `http://<device>:80/set_pin` | Create or replace a PIN record |
+| PIN API | `http://<device>:80/get_pin` | Retrieve a key share after PIN verification |
 
-After Wi-Fi setup, open `https://espinserver.local/` or the ESP32 IP address.
-The first visit may show a browser warning because the ESP32 creates its own
-self-signed certificate. The interface is protected by a storage password:
-create it on first boot by entering it twice, or enter it once on later boots
-to unlock the encrypted PIN database.
+The browser interface uses HTTPS with a device-generated self-signed certificate.
+The two API endpoints intentionally remain on HTTP port 80 for Jade compatibility;
+other HTTP paths redirect to HTTPS. Use an isolated, trusted test network.
 
-The interface contains four main pages:
+The PIN database is locked until the storage password is entered after Wi-Fi is
+available. On first boot, create a 12–64 character password containing uppercase,
+lowercase, a number, and a symbol. The password is not stored.
 
-- **Dashboard** shows database slot usage, PIN request counters, and hardware
-  information such as chip model, CPU frequency, free heap, and temperature.
-- **Pairing** shows the QR code, primary and secondary API URLs, and the server
-  public key used by a Jade. The normal local API URLs are `http://<device-ip>:80`
-  and `http://<mdns-name>.local:80`.
-- **Configuration** changes the mDNS name, server key, diagnostics and LED
-  options. It also provides controls to reset counters, refresh the self-signed
-  HTTPS certificate, generate a new server key, or wipe the PIN database.
-- **Diagnostics** displays stored PIN-record metadata and recent in-memory
-  connection logs. It does not display PINs.
+## Web interface
 
-The browser pages use HTTPS on port 443. For Jade compatibility, the PIN API
-uses HTTP on port 80 at `/set_pin` and `/get_pin`; other HTTP paths redirect to
-HTTPS.
+- **Dashboard** — database slot usage, PIN request counters, and ESP32 status.
+- **Pairing** — QR code, primary and secondary API URLs, and server public key.
+- **Configuration** — mDNS name, server key, diagnostics and LED options,
+  statistics reset, certificate refresh, key generation, and database wipe.
+- **Diagnostics** — PIN-record metadata and recent in-memory connection logs;
+  PINs are never displayed.
 
-## Use ESPinServer with a Blockstream Jade
+Use `https://espinserver.local/` when mDNS works, or the device IP address shown
+by your router or serial monitor. The Pairing page's API URLs must use `http://`
+and port `80`; they are different from the HTTPS address used by the browser.
 
-1. Flash ESPinServer, connect it to the same Wi-Fi network as the Jade, and
-   unlock the web interface.
-2. Open **Pairing** and confirm both URLs use `http://` and port `80`. Leave
-   the server public key included in the generated QR code.
-3. On the Jade, open its custom PIN-server configuration flow and scan the QR
-   code shown by ESPinServer. Menu wording can vary between Jade firmware
-   versions; the flow accepts the primary URL, optional secondary URL, and
-   server public key.
-4. Test the setup by locking and unlocking the Jade with a test PIN. The first
-   successful setup creates a PIN record; later unlocks use `/get_pin`.
+## Build and flash
 
-For scripted USB configuration, the Jade repository also provides
-[`set_jade_pinserver.py`](https://github.com/Blockstream/Jade/blob/master/set_jade_pinserver.py),
-which can set the two URLs and public key directly. Use test wallets and test
-PINs only.
-
-An informational documentation site is published at
-[`valerio-vaccaro.github.io/ESPinServer`](https://valerio-vaccaro.github.io/ESPinServer/).
-It includes setup, protocol, and security pages. GitHub Pages is deployed
-automatically when files under `docs/` change on `main`.
-
-## Related resources
-
-- [Blockstream Jade repository](https://github.com/Blockstream/Jade)
-- [Blockstream Jade DIY and development documentation](https://github.com/Blockstream/Jade#readme)
-- [Blockstream DIY Jade flasher](https://github.com/Blockstream/jadediyflasher)
-- [ESPinServer-compatible DIY flasher](https://valerio-vaccaro.github.io/diyflasher/)
-- [Blockstream firmware update notes](https://github.com/Blockstream/Jade/blob/master/FWUPDATE.md)
-
-## Build
-
-Use the repository's local virtual environment:
+The repository includes a local PlatformIO environment. From the repository root:
 
 ```sh
 ./venv/bin/pio run
 ```
 
-The GitHub Actions workflow builds every PlatformIO environment and publishes
-browser-flasher-compatible binaries and `index.json` as an artifact.
+Build a specific board and upload it over USB:
+
+```sh
+./venv/bin/pio run -e esp32dev -t upload
+./venv/bin/pio device monitor -b 115200
+```
+
+For an ESP32-S3 DevKitC-1, use `-e esp32-s3-devkitc-1`. If PlatformIO cannot
+find the serial port, add `--upload-port <port>` to the upload command. The
+available environments and their partition layout are defined in
+[`platformio.ini`](platformio.ini).
+
+Prebuilt browser-flasher artifacts are produced by GitHub Actions. The workflow
+builds both board environments and packages the four binaries plus `index.json`
+for the [ESPinServer-compatible browser flasher](https://valerio-vaccaro.github.io/diyflasher/).
+
+## Technical reference
+
+- [Step-by-step tutorial](docs/TUTORIAL.md)
+- [Protocol implementation notes](docs/PINSERVER_PROTOCOL.md)
+- [Protocol overview](docs/protocol.html)
+- [Security model and limitations](docs/security.html)
+- [Web documentation](https://valerio-vaccaro.github.io/ESPinServer/)
+
+The protocol implementation includes ECDH-derived request and response keys,
+AES-256-CBC/HMAC-SHA256 encrypted envelopes, replay counters, progressive
+failed-attempt cooldowns, and dummy responses for unknown or incorrect PINs.
+
+## Related resources
+
+- [Blockstream Jade](https://github.com/Blockstream/Jade)
+- [Jade scripted PIN-server setup](https://github.com/Blockstream/Jade/blob/master/set_jade_pinserver.py)
+- [Blockstream DIY Jade flasher](https://github.com/Blockstream/jadediyflasher)
+- [ESPinServer-compatible DIY flasher](https://valerio-vaccaro.github.io/diyflasher/)
+- [Blockstream firmware update notes](https://github.com/Blockstream/Jade/blob/master/FWUPDATE.md)
+
+## Development checks
+
+Build all PlatformIO environments with:
+
+```sh
+./venv/bin/pio run
+```
+
+The integration tests target a running, disposable ESPinServer and deliberately
+wipe its PIN database before and after the test session. They require the
+additional client dependencies described in the test file:
+
+```sh
+./venv/bin/python -m pytest -q tests/test_pinserver_integration.py \
+  --pinserver-url http://espinserver.local
+```
+
+Do not point this suite at a device containing data you want to keep.
