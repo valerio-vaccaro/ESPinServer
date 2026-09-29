@@ -50,5 +50,7 @@ def generate_header():
 
     print(f"Generated version.h with version: {version}")
 
-if __name__ == '__main__':
-    generate_header()
+# PlatformIO loads this file as a pre-build extra script.  Extra scripts are
+# executed by PlatformIO rather than necessarily as a normal Python entry
+# point, so invoke the generator at module load time.
+generate_header()
