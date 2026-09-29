@@ -4,6 +4,14 @@ import subprocess
 import os
 import sys
 
+try:
+    # PlatformIO exposes the build environment to extra scripts.
+    Import("env")
+    PROJECT_DIR = env.subst("$PROJECT_DIR")
+except NameError:
+    # Keep the script runnable directly for local checks.
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def get_version():
     """Get version from git tag or abbreviated commit hash."""
     try:
@@ -11,7 +19,7 @@ def get_version():
         tag = subprocess.check_output(
             ['git', 'describe', '--tags', '--exact-match'],
             stderr=subprocess.DEVNULL,
-            cwd=os.path.dirname(__file__)
+            cwd=PROJECT_DIR
         ).decode().strip()
         return tag
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -22,7 +30,7 @@ def get_version():
         commit = subprocess.check_output(
             ['git', 'rev-parse', '--short=8', 'HEAD'],
             stderr=subprocess.DEVNULL,
-            cwd=os.path.dirname(__file__)
+            cwd=PROJECT_DIR
         ).decode().strip()
         return commit
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -42,7 +50,7 @@ def generate_header():
 #endif // VERSION_H
 '''
 
-    header_path = os.path.join(os.path.dirname(__file__), 'include', 'version.h')
+    header_path = os.path.join(PROJECT_DIR, 'include', 'version.h')
     os.makedirs(os.path.dirname(header_path), exist_ok=True)
 
     with open(header_path, 'w') as f:
