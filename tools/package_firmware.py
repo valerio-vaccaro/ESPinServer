@@ -53,7 +53,10 @@ def main() -> None:
     boot_app0 = boot_app0_source()
 
     for environment in sorted(path for path in args.build_dir.iterdir() if path.is_dir()):
-        board_output = output / environment.name
+        # Keep each board's files namespaced by the build version so artifacts
+        # from different releases can be unpacked together safely.
+        board_folder = f"{args.version}_{environment.name}"
+        board_output = output / board_folder
         board_output.mkdir(parents=True, exist_ok=True)
         files = []
         for address, source_name in FLASH_FILES:
@@ -68,7 +71,7 @@ def main() -> None:
             shutil.copyfile(source, target)
             files.append({
                 "address": f"0x{address:X}",
-                "file": f"{environment.name}/{target_name}",
+                "file": f"{board_folder}/{target_name}",
                 "sha256": sha256(target),
                 "size": target.stat().st_size,
             })
