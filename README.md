@@ -91,6 +91,16 @@ for the [ESPinServer-compatible browser flasher](https://valerio-vaccaro.github.
 The protocol implementation includes ECDH-derived request and response keys,
 AES-256-CBC/HMAC-SHA256 encrypted envelopes, replay counters, progressive
 failed-attempt cooldowns, and dummy responses for unknown or incorrect PINs.
+The server response contains a server key; Jade derives the final key as
+`HMAC-SHA256(server_key, raw_pin)`.
+
+For testing encrypted files or strings, see the
+[PIN-server utility tutorial](tools/README.md). The utility supports both the
+official Jade defaults and a local ESPinServer, and never stores the PIN in its
+output envelope.
+
+Operational logs contain only non-secret status information; PINs, private
+keys, payloads, decrypted content, and credentials are not logged.
 
 ## Related resources
 

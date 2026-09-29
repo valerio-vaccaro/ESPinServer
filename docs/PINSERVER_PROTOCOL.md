@@ -107,8 +107,9 @@ After AES-CBC decryption and removal of PKCS#7 padding, the request contains:
 65 bytes   recoverable secp256k1 signature
 ```
 
-The Jade normally derives `pin_secret` as `SHA256(user_pin)`. `client_entropy`
-is required for `/set_pin` and omitted for `/get_pin`.
+The Jade derives `pin_secret` as a nested HMAC using the client private key and
+the raw user PIN. `client_entropy` is required for `/set_pin` and omitted for
+`/get_pin`.
 
 The signature is recovered against this SHA-256 message:
 
@@ -152,8 +153,9 @@ secret = SHA256(compressed(shared_point))
 keys = HMAC-SHA512(secret, "blind_oracle_response")
 ```
 
-The decrypted response is exactly 32 bytes: the final AES key share used by
-the Jade PIN flow. The response is encrypted as:
+The decrypted response is exactly 32 bytes: the server key. The Jade client
+derives the final AES key by computing `HMAC-SHA256(server_key, raw_pin)`. The
+response is encrypted as:
 
 ```text
 16 bytes   random IV
@@ -162,18 +164,9 @@ N bytes    AES-256-CBC(32-byte response with PKCS#7 padding)
 ```
 
 For `/set_pin`, the server generates a random 32-byte `saved_key`, stores it,
-and returns:
-
-```text
-final_key = HMAC-SHA256(saved_key, pin_secret)
-```
-
-For `/get_pin` with a valid PIN, it returns the same expression using the
-stored key. For an unknown client or incorrect PIN, it uses a random dummy key:
-
-```text
-final_key = HMAC-SHA256(random_dummy_key, pin_secret)
-```
+and returns it. For `/get_pin` with a valid PIN, it returns the stored key.
+For an unknown client or incorrect PIN, it returns a random dummy key. The
+client then derives `final_key = HMAC-SHA256(server_key, raw_pin)` in all cases.
 
 This keeps the response shape uniform and avoids directly revealing whether a
 client record or PIN was found.

@@ -156,6 +156,40 @@ wrong attempt the record has a 5-second cooldown; after the second it has a
 60-second cooldown; the third wrong attempt invalidates the record. This is
 expected behavior, not a network failure.
 
+## 8a. Test an encrypted string or JSON document
+
+The repository includes [`tools/pinclient.py`](../tools/pinclient.py), a
+small Jade-compatible client for testing a PIN-protected encrypted envelope.
+Install its Python dependencies first:
+
+```sh
+python3 -m pip install -r tools/requirements.txt
+```
+
+Blind a file through the local server:
+
+```sh
+python3 tools/pinclient.py blind notes.txt 123456 \
+  --url-a http://espinserver.local:80 --url-b ""
+```
+
+This creates `notes.txt.pin`. Recover the original file with the PIN:
+
+```sh
+python3 tools/pinclient.py unblind notes.txt.pin 123456
+```
+
+For a string instead of a file, use `--string`. It creates a nameless
+`pin_<random>.txt.pin` envelope and restores `pin_<random>.txt` when unblinded:
+
+```sh
+python3 tools/pinclient.py blind --string '{"message":"hello"}' 123456
+```
+
+The envelope contains the server details, client key material, replay counter,
+and encrypted payload, but never the PIN. Treat the envelope as sensitive. The
+official Jade server defaults are used when `--url-a` and `--url-b` are omitted.
+
 ## 9. Maintenance and recovery
 
 - **Certificate refresh:** Configuration → refresh certificate. Reconnect and

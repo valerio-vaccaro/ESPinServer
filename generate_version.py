@@ -14,6 +14,16 @@ except NameError:
 
 def get_version():
     """Get version from git tag or abbreviated commit hash."""
+    # CI provides the ref explicitly. This is more reliable than asking git
+    # to discover a tag in a shallow checkout, where tag metadata may be absent.
+    build_version = os.environ.get("BUILD_VERSION")
+    if build_version:
+        if os.environ.get("GITHUB_REF_TYPE") == "tag":
+            return build_version.removeprefix("v")
+        if len(build_version) >= 8 and all(c in "0123456789abcdefABCDEF" for c in build_version):
+            return build_version[:8]
+        return build_version
+
     try:
         # Try to get the current tag
         tag = subprocess.check_output(

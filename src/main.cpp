@@ -757,7 +757,11 @@ void handleRoot() {
     html += "</head><body>";
     html += pageNav("home");
     html += "<div class='card'>";
-    html += "<h1>ESPinServer <span style='font-size:14px;color:#00B0FF;font-weight:normal;'>v " + String(FIRMWARE_VERSION) + "</span></h1>";
+    String firmware_version = String(FIRMWARE_VERSION);
+    if (firmware_version.startsWith("v") || firmware_version.startsWith("V")) {
+        firmware_version = firmware_version.substring(1);
+    }
+    html += "<h1>ESPinServer <span style='font-size:14px;color:#00B0FF;font-weight:normal;'>v " + firmware_version + "</span></h1>";
     html += "<p style='text-align:center;'>The ESP-based PinServer for local research and interoperability testing.</p>";
     
     html += "<div class='info-item'><strong>Database Slots Usage</strong><span class='badge' style='font-size:14px;padding:6px 12px;color:#00B0FF;border-color:rgba(0,176,255,0.25);'>" + String(active_records) + " / " + String(MAX_PINS) + " Used (" + String(free_slots) + " Free)</span></div>";
@@ -1234,14 +1238,16 @@ void handlePinRequest(bool is_set) {
         pin_db[slot].valid = true;
         savePins();
         
-        hmac_crypto_sha256(saved_key, 32, pin_secret, 32, final_aes_key);
+        // Return the server key. The Jade client derives the final key from
+        // this response and the raw PIN, keeping both implementations aligned.
+        memcpy(final_aes_key, saved_key, 32);
         addLog(client_ip, endpoint, "200 OK (New PIN Created)");
     } else {
         if (slot == -1) {
             // Blind security: if not found, return random dummy response
             uint8_t dummy_key[32];
             for (int i = 0; i < 32; i++) dummy_key[i] = random(256);
-            hmac_crypto_sha256(dummy_key, 32, pin_secret, 32, final_aes_key);
+            memcpy(final_aes_key, dummy_key, 32);
             addLog(client_ip, endpoint, "200 OK (Blind Dummy Served)");
         } else {
             // Persist the time as soon as a stored record is addressed, including
@@ -1287,7 +1293,9 @@ void handlePinRequest(bool is_set) {
                 pin_db[slot].attempts = 0;
                 saved_pin_verified = true;
                 savePins();
-                hmac_crypto_sha256(pin_db[slot].aes_key, 32, pin_secret, 32, final_aes_key);
+                // Return the server key; the Jade client derives the final
+                // encryption key from this value and the raw PIN.
+                memcpy(final_aes_key, pin_db[slot].aes_key, 32);
                 addLog(client_ip, endpoint, "200 OK (PIN Verified)");
             } else {
                 // Incorrect pin!
@@ -1304,7 +1312,7 @@ void handlePinRequest(bool is_set) {
                 // Return dummy key to avoid disclosing failure
                 uint8_t dummy_key[32];
                 for (int i = 0; i < 32; i++) dummy_key[i] = random(256);
-                hmac_crypto_sha256(dummy_key, 32, pin_secret, 32, final_aes_key);
+                memcpy(final_aes_key, dummy_key, 32);
                 addLog(client_ip, endpoint, "200 OK (Wrong PIN - Dummy Served)");
             }
         }

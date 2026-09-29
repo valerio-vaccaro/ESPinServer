@@ -3,7 +3,7 @@ name: Build firmware
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['*']
   pull_request:
   workflow_dispatch:
 
@@ -14,6 +14,8 @@ jobs:
   build:
     name: Build and package firmware
     runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -30,12 +32,11 @@ jobs:
         run: pio run
 
       - name: Package browser-flasher files
-        env:
-          BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
-        run: >-
-          python tools/package_firmware.py
-          --version "$BUILD_VERSION"
-          --output dist
+        run: |
+          PACKAGE_VERSION="${BUILD_VERSION#v}"
+          python tools/package_firmware.py \
+            --version "$PACKAGE_VERSION" \
+            --output dist
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
